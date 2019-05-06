@@ -61,10 +61,6 @@ int main() {
 	cin >> ip;
 	cout << "Port: ";
 	cin >> port;
-	/*
-	ip = "127.0.0.1";
-	port = "5000";
-	*/
 
 	result = getaddrinfo(ip.c_str(), port.c_str(), &hints, &res);
 	if (result != 0) {
@@ -101,8 +97,6 @@ int main() {
 		thread my_thread(client_handler, msocket);
 		while (true) {
 			cin >> message;
-			printf("\r%80c\r", ' ');
-			cout << "\r" << name << ": " << message;
 			result = send(msocket, message.c_str(), strlen(message.c_str()), 0);
 			if (result <= 0) {
 				cout << "send() failed: " << WSAGetLastError() << endl;

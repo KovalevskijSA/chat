@@ -1,0 +1,4 @@
+<chat_server>
+	<port>5000</port>
+	<ip>127.0.0.1</ip>
+</chat_server>

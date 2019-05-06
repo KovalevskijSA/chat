@@ -1,18 +1,23 @@
-#include <iostream>
 #include <WinSock2.h>
 #include <WS2tcpip.h>
 #include <string>
 #include <thread>
 #include <list>
-#include <Windows.h>
 #include <fstream>
-
-#pragma comment (lib, "Ws2_32.lib")
+#include <iostream>
+#include <windows.h>
 
 #define MAX_SIZE 1024
-#define MAX_PIPE_SIZE 1024
+#define MAX_PIPE_SIZE 512
+
+#pragma comment(lib, "advapi32.lib")
+#pragma comment (lib, "Ws2_32.lib")
 
 using namespace std;
+
+SERVICE_STATUS_HANDLE   hServiceStatusHandle;
+SERVICE_STATUS          ServiceStatus;
+
 class ClientInfo {
 public:
 	string name;
@@ -22,7 +27,7 @@ public:
 		name = "";
 		socket = INVALID_SOCKET;
 	}
-	~ClientInfo(){
+	~ClientInfo() {
 		closesocket(socket);
 		cthread.detach();
 	}
@@ -32,6 +37,7 @@ list<ClientInfo*> clients;
 
 string ip = "127.0.0.1";
 string port = "5000";
+bool server_stop;
 
 void client_handler(ClientInfo* client) {
 	string message = "";
@@ -66,15 +72,12 @@ void client_handler(ClientInfo* client) {
 			if (strcmp("", temp_msg) && strcmp("\n", temp_msg))
 				message = client->name + ": " + temp_msg;
 
-			cout << message << endl;
 			for (itr = clients.begin(); itr != clients.end(); itr++) {
 				if ((*itr)->socket != INVALID_SOCKET && (*itr)->socket != client->socket)
 					send((*itr)->socket, message.c_str(), strlen(message.c_str()), 0);
 			}
 		}
 		else {
-			message = client->name + " disconnected";
-			cout << message << endl;
 			clients.remove(client);
 			delete client;
 			break;
@@ -82,9 +85,10 @@ void client_handler(ClientInfo* client) {
 	}
 }
 
-void ServiceStatus() {
+
+void SendingThreadProc() {
 	HANDLE hNamedPipe = CreateNamedPipe(
-		"\\\\.\\pipe\\Chat",
+		"\\\\.\\pipe\\ChatService",
 		PIPE_ACCESS_OUTBOUND,
 		PIPE_TYPE_MESSAGE | PIPE_WAIT,
 		1,
@@ -92,13 +96,8 @@ void ServiceStatus() {
 		0,
 		0,
 		NULL);
-	if (hNamedPipe == INVALID_HANDLE_VALUE) {
-		cout << "Connection with the named pipe failed";
-		return;
-	}
-	while (true) {
+	while (hNamedPipe != INVALID_HANDLE_VALUE) {
 		if (!ConnectNamedPipe(hNamedPipe, NULL)) {
-			cout << "Connection with the named pipe failed." << endl;
 			CloseHandle(hNamedPipe);
 			return;
 		}
@@ -110,7 +109,7 @@ void ServiceStatus() {
 		WriteFile(
 			hNamedPipe,
 			names.c_str(),
-			sizeof(char) *(names.length() + 1),
+			sizeof(char) * (names.length() + 1),
 			&dwBytesWritten,
 			NULL
 		);
@@ -139,11 +138,10 @@ void ReadConfigFile(string config) {
 }
 
 
-int main() {
+int Start() {
 	WSADATA wsaData;
 	int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
 	if (result != 0) {
-		cout << "WSAStartup failed:";
 		return result;
 	}
 	struct addrinfo hints;
@@ -155,18 +153,14 @@ int main() {
 	hints.ai_protocol = IPPROTO_TCP;
 	hints.ai_flags = AI_PASSIVE;
 	ReadConfigFile("config.xml");
-	cout << "ip " << ip << endl;
-	cout << "port " << port << endl;
 	result = getaddrinfo(ip.c_str(), port.c_str(), &hints, &server);
 	if (result != 0) {
-		cout << "getaddrinfo failed: ";
 		WSACleanup();
 		return 1;
 	}
 
 	int server_socket = socket(server->ai_family, server->ai_socktype, server->ai_protocol);
 	if (server_socket == INVALID_SOCKET) {
-		cout << "Error at socket: " << WSAGetLastError();
 		freeaddrinfo(server);
 		WSACleanup();
 		return 1;
@@ -174,35 +168,69 @@ int main() {
 
 	result = bind(server_socket, server->ai_addr, (int)server->ai_addrlen);
 	if (result == SOCKET_ERROR) {
-		cout << "bind failed with error: " << WSAGetLastError() << "\n";
 		freeaddrinfo(server);
 		closesocket(server_socket);
 		WSACleanup();
 		return 1;
 	}
-	
-	cout << "Ok..." << std::endl;
+
 	if (listen(server_socket, SOMAXCONN) == SOCKET_ERROR) {
-		cout << "listen failed with error: " << WSAGetLastError() << "\n";
 		closesocket(server_socket);
 		WSACleanup();
 		return 1;
 	}
-
-	thread status_thread = thread(ServiceStatus);
+	server_stop = false;
+	thread send_thread = thread(SendingThreadProc);
 	string message = "";;
-	while (true) {
+	while (!server_stop) {
 		SOCKET client_socket = accept(server_socket, NULL, NULL);
 		if (client_socket == INVALID_SOCKET) continue;
-		ClientInfo* client = new ClientInfo();
+		ClientInfo * client = new ClientInfo();
 		client->socket = client_socket;
 		client->cthread = thread(client_handler, ref(client));
-	} 
-	status_thread.detach();
+	}
+	send_thread.detach();
 	closesocket(server_socket);
 	clients.clear();
 
 	WSACleanup();
-	system("pause");
+	return 0;
+}
+
+
+void ServiceHandler(DWORD fdwControl)
+{
+	if (fdwControl == SERVICE_CONTROL_STOP) {
+		ServiceStatus.dwCurrentState = SERVICE_STOPPED;
+		server_stop = true;
+		SetServiceStatus(hServiceStatusHandle, &ServiceStatus);
+	}
+}
+
+void ServiceMain(DWORD dwArgc, LPTSTR* lpszArgv)
+{
+	ServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+	ServiceStatus.dwCurrentState = SERVICE_RUNNING;
+	ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_CONTROL_INTERROGATE;
+	ServiceStatus.dwWin32ExitCode = 0;
+	ServiceStatus.dwServiceSpecificExitCode = 0;
+	ServiceStatus.dwCheckPoint = 0;
+	ServiceStatus.dwWaitHint = 1000;
+	hServiceStatusHandle = RegisterServiceCtrlHandler("ChatService", (LPHANDLER_FUNCTION)ServiceHandler);
+	
+	SetServiceStatus(hServiceStatusHandle, &ServiceStatus);
+	Start();
+	ServiceStatus.dwCurrentState = SERVICE_STOPPED;
+	SetServiceStatus(hServiceStatusHandle, &ServiceStatus);
+}
+
+
+int main() {
+	SERVICE_TABLE_ENTRY DispatchTable[] =
+	{
+		{ (LPSTR)"ChatService", (LPSERVICE_MAIN_FUNCTION)ServiceMain },
+		{ NULL, NULL }
+	};
+	StartServiceCtrlDispatcher(DispatchTable);
 	return 0;
 }
